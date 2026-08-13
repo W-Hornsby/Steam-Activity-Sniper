@@ -141,7 +141,7 @@ class SteamActivitySniper(tk.Tk):
 
     def _apply_update(self, update):
         if self.monitor:
-            self.next_check_at = time.time() + self.monitor.interval
+            self.next_check_at = time.time() + self.monitor.next_wait
 
         error = update.get("error")
         snapshot = update.get("snapshot")
@@ -170,8 +170,9 @@ class SteamActivitySniper(tk.Tk):
         self.hours_var.set(f"Hours: {hours}")
 
         if changed:
+            reason = update.get("reason") or "Activity changed"
             self.activity_label.config(text="RECENTLY ACTIVE!", fg=COLOR_ACTIVE)
-            self._log(f"RECENTLY ACTIVE! Top game: {top} | {hours}")
+            self._log(f"RECENTLY ACTIVE! ({reason}) Top game: {top} | {hours}")
         else:
             self.activity_label.config(text="No change detected", fg=COLOR_IDLE)
             self._log(f"No change. Top game: {top} | {hours}")

@@ -38,6 +38,18 @@ def _clean_text(value):
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _hours_value(hours_text):
+    if not hours_text:
+        return None
+    match = re.search(r"([\d.]+)", hours_text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
 def parse_snapshot(html):
     soup = BeautifulSoup(html, "html.parser")
     hours_el = soup.select_one(".recentgame_recentplaytime > div")
@@ -55,6 +67,7 @@ class SteamProfileMonitor:
         self.interval = interval
         self.last_snapshot = None
         self.changes = 0
+        self.next_wait = interval
         self._stop_event = threading.Event()
         self._check_now_event = threading.Event()
 
@@ -71,12 +84,21 @@ class SteamProfileMonitor:
         self._check_now_event.set()
 
     def run(self, on_update):
+        consecutive_errors = 0
         while not self._stop_event.is_set():
-            self._check_once(on_update)
+            ok = self._check_once(on_update)
             if self._stop_event.is_set():
                 break
+            if not ok:
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 0
+            wait = self.interval
+            if consecutive_errors:
+                wait = self.interval * min(2 ** consecutive_errors, 4)
+            self.next_wait = wait
             waited = 0.0
-            while waited < self.interval and not self._stop_event.is_set():
+            while waited < wait and not self._stop_event.is_set():
                 if self._check_now_event.wait(0.2):
                     self._check_now_event.clear()
                     break
@@ -91,9 +113,22 @@ class SteamProfileMonitor:
             error = str(exc)
 
         changed = False
+        reason = None
         previous = self.last_snapshot
         if snapshot is not None and previous is not None:
-            changed = snapshot != previous
+            top_changed = snapshot.get("top_game") != previous.get("top_game")
+            hours_increased = False
+            new_hours = _hours_value(snapshot.get("hours"))
+            old_hours = _hours_value(previous.get("hours"))
+            if new_hours is not None and old_hours is not None and new_hours > old_hours:
+                hours_increased = True
+            if top_changed and hours_increased:
+                reason = "New top game and hours increased"
+            elif top_changed:
+                reason = "New top game"
+            elif hours_increased:
+                reason = "Hours increased"
+            changed = reason is not None
         if changed:
             self.changes += 1
         if snapshot is not None:
@@ -104,7 +139,9 @@ class SteamProfileMonitor:
                 "snapshot": snapshot,
                 "previous": previous,
                 "changed": changed,
+                "reason": reason,
                 "count": self.changes,
                 "error": error,
             }
         )
+        return error is None
