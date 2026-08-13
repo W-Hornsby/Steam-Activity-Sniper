@@ -20,7 +20,6 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://steamcommunity.com/",
     "Upgrade-Insecure-Requests": "1",
 }
@@ -85,13 +84,15 @@ class SteamProfileMonitor:
 
     @staticmethod
     def _build_session():
-        kwargs = {"headers": dict(HEADERS), "timeout": 30}
         if HTTP_IMPERSONATE:
-            kwargs["impersonate"] = HTTP_IMPERSONATE
-        return http.Session(**kwargs)
+            session = http.Session(impersonate=HTTP_IMPERSONATE)
+        else:
+            session = http.Session()
+        session.headers.update(HEADERS)
+        return session
 
     def fetch_snapshot(self):
-        response = self._session.get(self.url)
+        response = self._session.get(self.url, timeout=30)
         response.raise_for_status()
         return parse_snapshot(response.text)
 
