@@ -1,8 +1,14 @@
 import re
 import threading
 
-import requests
 from bs4 import BeautifulSoup
+
+try:
+    from curl_cffi import requests as http
+    HTTP_IMPERSONATE = "chrome"
+except ImportError:
+    import requests as http
+    HTTP_IMPERSONATE = None
 
 CHECK_INTERVAL_SECONDS = 300
 
@@ -11,7 +17,12 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://steamcommunity.com/",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 
@@ -70,9 +81,17 @@ class SteamProfileMonitor:
         self.next_wait = interval
         self._stop_event = threading.Event()
         self._check_now_event = threading.Event()
+        self._session = self._build_session()
+
+    @staticmethod
+    def _build_session():
+        kwargs = {"headers": dict(HEADERS), "timeout": 30}
+        if HTTP_IMPERSONATE:
+            kwargs["impersonate"] = HTTP_IMPERSONATE
+        return http.Session(**kwargs)
 
     def fetch_snapshot(self):
-        response = requests.get(self.url, headers=HEADERS, timeout=30)
+        response = self._session.get(self.url)
         response.raise_for_status()
         return parse_snapshot(response.text)
 
