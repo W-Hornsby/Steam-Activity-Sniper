@@ -1,16 +1,10 @@
 import re
 import threading
 
+import requests
 from bs4 import BeautifulSoup
 
-try:
-    from curl_cffi import requests as http
-    HTTP_IMPERSONATE = "chrome"
-except ImportError:
-    import requests as http
-    HTTP_IMPERSONATE = None
-
-CHECK_INTERVAL_SECONDS = 300
+CHECK_INTERVAL_SECONDS = 630
 
 HEADERS = {
     "User-Agent": (
@@ -84,10 +78,7 @@ class SteamProfileMonitor:
 
     @staticmethod
     def _build_session():
-        if HTTP_IMPERSONATE:
-            session = http.Session(impersonate=HTTP_IMPERSONATE)
-        else:
-            session = http.Session()
+        session = requests.Session()
         session.headers.update(HEADERS)
         return session
 
