@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Local, Utc};
 use eframe::egui;
 use egui::{Color32, ComboBox, RichText, ScrollArea};
-use egui_plot::{Corner, Legend, Line, Plot, PlotBounds};
+use egui_plot::{Corner, Legend, Line, Plot, PlotBounds, PlotUi};
 
 use crate::db::{Database, Game};
 use crate::listener::{user_key_from_url, CallbackPayload, Event, PORT};
@@ -13,6 +13,18 @@ use crate::listener::{user_key_from_url, CallbackPayload, Event, PORT};
 const SERIES_RECORD: &str = "Hours on record";
 const SERIES_2WK: &str = "Hours past 2 weeks";
 const MAX_LOG_LINES: usize = 300;
+// Default zoom level: a 10-minute window centered on the latest data point.
+const DEFAULT_VIEW_SPAN: f64 = 600.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewRequest {
+    // Startup / selection change: 10-minute window centered on the latest
+    // point, y-axis fitted to the visible data.
+    Default,
+    // Recenter button: keep the current zoom, pan horizontally so the latest
+    // point sits in the middle of the graph.
+    Center,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Timeframe {
@@ -63,7 +75,7 @@ pub struct SniperApp {
     timeframe: Timeframe,
     log: Vec<String>,
     connected: bool,
-    recenter: bool,
+    view_request: Option<ViewRequest>,
     last_view_sig: Option<(Option<String>, Option<String>, Timeframe)>,
 }
 
@@ -77,7 +89,7 @@ impl SniperApp {
             timeframe: Timeframe::All,
             log: Vec::new(),
             connected: false,
-            recenter: true,
+            view_request: None,
             last_view_sig: None,
         };
         {
@@ -101,6 +113,9 @@ impl SniperApp {
                 }
                 Event::Callback(payload) => {
                     self.connected = true;
+                    if !payload.disabled {
+                        self.view_request = Some(ViewRequest::Center);
+                    }
                     self.log_callback(&payload);
                 }
                 Event::Log(msg) => self.logf(msg),
@@ -349,7 +364,7 @@ impl SniperApp {
             (now - w) * 1000
         });
         let (record, two_week, summary) = self.build_series(cutoff_ts);
-        let recenter = std::mem::take(&mut self.recenter);
+        let view_request = self.view_request.take();
 
         if let Some((name, h2w, hrec)) = summary {
             ui.horizontal(|ui| {
@@ -361,7 +376,7 @@ impl SniperApp {
                 ui.label(RichText::new(sub).size(15.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Recenter").clicked() {
-                        self.recenter = true;
+                        self.view_request = Some(ViewRequest::Center);
                     }
                 });
             });
@@ -382,12 +397,6 @@ impl SniperApp {
             return;
         }
 
-        let span_secs = self.timeframe.window_secs().unwrap_or(30 * 86400) as f64;
-        let bounds = if recenter {
-            recent_bounds(&record, &two_week, span_secs)
-        } else {
-            None
-        };
         let available = (ui.available_height() - 8.0).max(220.0);
         Plot::new("main_plot")
             .height(available)
@@ -395,6 +404,10 @@ impl SniperApp {
             .x_axis_formatter(|mark, _| fmt_ts(mark.value as i64))
             .y_axis_formatter(|mark, _| format!("{:.1}", mark.value))
             .show(ui, |plot_ui| {
+                let bounds = view_request.and_then(|req| match req {
+                    ViewRequest::Default => default_bounds(&record, &two_week),
+                    ViewRequest::Center => center_bounds(plot_ui, &record, &two_week),
+                });
                 if !record.is_empty() {
                     plot_ui.line(
                         Line::new(SERIES_RECORD, record)
@@ -485,7 +498,7 @@ impl eframe::App for SniperApp {
 
         let sig = (self.selected_user.clone(), self.selected_game.clone(), self.timeframe);
         if self.last_view_sig.as_ref() != Some(&sig) {
-            self.recenter = true;
+            self.view_request = Some(ViewRequest::Default);
             self.last_view_sig = Some(sig);
         }
 
@@ -528,33 +541,32 @@ fn fmt_ts(ts: i64) -> String {
     }
 }
 
-// View bounds ending at the present (the latest data point), with the y-axis
-// fitted to the visible data. The x-span adapts: at least the requested
-// window, but tightens around sparse data so a young series with points
-// minutes apart still renders as a visible line rather than a dot.
-fn recent_bounds(record: &[[f64; 2]], two_week: &[[f64; 2]], span_secs: f64) -> Option<PlotBounds> {
+// The latest data point across both series, as x-axis seconds.
+fn latest_x(record: &[[f64; 2]], two_week: &[[f64; 2]]) -> Option<f64> {
     let mut x_max = f64::NEG_INFINITY;
-    let mut x_min = f64::INFINITY;
     for p in record.iter().chain(two_week.iter()) {
         if p[0] > x_max {
             x_max = p[0];
         }
-        if p[0] < x_min {
-            x_min = p[0];
-        }
     }
-    if !x_max.is_finite() {
-        return None;
+    if x_max.is_finite() {
+        Some(x_max)
+    } else {
+        None
     }
-    let x_max = x_max.max(Local::now().timestamp() as f64);
-    let data_span = (x_max - x_min).max(0.0);
-    let span = span_secs.max(data_span * 1.5 + 3600.0);
-    let x_min = x_max - span;
+}
+
+// Default view: a 10-minute window centered on the latest point, y-axis
+// fitted to the data inside that window.
+fn default_bounds(record: &[[f64; 2]], two_week: &[[f64; 2]]) -> Option<PlotBounds> {
+    let center = latest_x(record, two_week)?;
+    let x_min = center - DEFAULT_VIEW_SPAN / 2.0;
+    let x_max = center + DEFAULT_VIEW_SPAN / 2.0;
 
     let mut y_min = f64::INFINITY;
     let mut y_max = f64::NEG_INFINITY;
     for p in record.iter().chain(two_week.iter()) {
-        if p[0] >= x_min {
+        if p[0] >= x_min && p[0] <= x_max {
             if p[1] < y_min {
                 y_min = p[1];
             }
@@ -563,17 +575,38 @@ fn recent_bounds(record: &[[f64; 2]], two_week: &[[f64; 2]], span_secs: f64) -> 
             }
         }
     }
-    if !y_min.is_finite() {
-        y_min = 0.0;
-        y_max = 10.0;
-    } else if y_max - y_min < 0.5 {
-        let mid = (y_min + y_max) / 2.0;
-        y_min = mid - 0.25;
-        y_max = mid + 0.25;
-    } else {
-        let pad = (y_max - y_min) * 0.08;
-        y_min = (y_min - pad).max(0.0);
-        y_max += pad;
-    }
+    let (y_min, y_max) = fit_y(y_min, y_max);
     Some(PlotBounds::from_min_max([x_min, y_min], [x_max, y_max]))
+}
+
+// Recenter: keep the current zoom (x-span and y-range), pan horizontally so
+// the latest point sits in the middle of the graph.
+fn center_bounds(
+    plot_ui: &PlotUi,
+    record: &[[f64; 2]],
+    two_week: &[[f64; 2]],
+) -> Option<PlotBounds> {
+    let center = latest_x(record, two_week)?;
+    let cur = plot_ui.plot_bounds();
+    let (cur_min, cur_max) = (cur.min(), cur.max());
+    if !(cur_min[0].is_finite() && cur_max[0].is_finite() && cur_max[0] > cur_min[0]) {
+        return default_bounds(record, two_week);
+    }
+    let span = (cur_max[0] - cur_min[0]).max(60.0);
+    Some(PlotBounds::from_min_max(
+        [center - span / 2.0, cur_min[1]],
+        [center + span / 2.0, cur_max[1]],
+    ))
+}
+
+fn fit_y(y_min_in: f64, y_max_in: f64) -> (f64, f64) {
+    if !y_min_in.is_finite() {
+        (0.0, 10.0)
+    } else if y_max_in - y_min_in < 0.5 {
+        let mid = (y_min_in + y_max_in) / 2.0;
+        (mid - 0.25, mid + 0.25)
+    } else {
+        let pad = (y_max_in - y_min_in) * 0.08;
+        ((y_min_in - pad).max(0.0), y_max_in + pad)
+    }
 }
