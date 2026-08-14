@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 pub const DB_FILE: &str = "steam_activity.json";
@@ -10,6 +11,20 @@ const MAX_HISTORY: usize = 20_000;
 // values (rapid duplicate posts from double-posts or multiple tabs). Regular
 // 5-minute refreshes must append a point so the time series actually grows.
 const DEDUP_WINDOW_MS: i64 = 60 * 1000;
+
+// Data lives in the OS app-data directory (e.g. %APPDATA%\SteamActivitySniper
+// on Windows) so installed copies work from Program Files without admin
+// rights and data survives reinstallation.
+fn db_path() -> PathBuf {
+    let mut path = ProjectDirs::from("", "", "SteamActivitySniper")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if !path.exists() {
+        let _ = fs::create_dir_all(&path);
+    }
+    path.push(DB_FILE);
+    path
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GamePoint {
@@ -73,15 +88,25 @@ pub struct Database {
     #[serde(default)]
     pub users: BTreeMap<String, User>,
 }
-
 impl Database {
-    pub fn load() -> Self {        let path = PathBuf::from(DB_FILE);
+    pub fn load() -> Self {
+        let path = db_path();
+        // One-time migration: older versions stored the database next to the
+        // executable / in the working directory.
+        let legacy = PathBuf::from(DB_FILE);
+        if !path.exists() && legacy.exists() {
+            if fs::rename(&legacy, &path).is_err() {
+                // File may be open elsewhere; copy instead so the data is
+                // preserved in the new location regardless.
+                let _ = fs::copy(&legacy, &path);
+            }
+        }
         match fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(db) => db,
                 Err(e) => {
-                    eprintln!("Failed to parse {DB_FILE}: {e}");
-                    let _ = fs::rename(&path, "steam_activity.json.bak");
+                    eprintln!("Failed to parse {}: {e}", path.display());
+                    let _ = fs::rename(&path, path.with_extension("json.bak"));
                     Self::default()
                 }
             },
@@ -90,10 +115,14 @@ impl Database {
     }
 
     pub fn save(&self) -> Result<(), String> {
+        let path = db_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        let tmp = PathBuf::from(format!("{DB_FILE}.tmp"));
+        let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, text).map_err(|e| e.to_string())?;
-        fs::rename(&tmp, PathBuf::from(DB_FILE)).map_err(|e| e.to_string())
+        fs::rename(&tmp, &path).map_err(|e| e.to_string())
     }
 
     pub fn apply_callback(
