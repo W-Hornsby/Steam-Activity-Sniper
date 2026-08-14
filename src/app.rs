@@ -398,12 +398,14 @@ impl SniperApp {
                 if !record.is_empty() {
                     plot_ui.line(
                         Line::new(SERIES_RECORD, record)
+                            .width(2.0)
                             .color(Color32::from_rgb(39, 174, 96)),
                     );
                 }
                 if !two_week.is_empty() {
                     plot_ui.line(
                         Line::new(SERIES_2WK, two_week)
+                            .width(2.0)
                             .color(Color32::from_rgb(241, 196, 15)),
                     );
                 }
@@ -526,20 +528,28 @@ fn fmt_ts(ts: i64) -> String {
     }
 }
 
-// View bounds ending at the present (the latest data point), spanning the
-// requested window, with the y-axis fitted to the visible data.
+// View bounds ending at the present (the latest data point), with the y-axis
+// fitted to the visible data. The x-span adapts: at least the requested
+// window, but tightens around sparse data so a young series with points
+// minutes apart still renders as a visible line rather than a dot.
 fn recent_bounds(record: &[[f64; 2]], two_week: &[[f64; 2]], span_secs: f64) -> Option<PlotBounds> {
     let mut x_max = f64::NEG_INFINITY;
+    let mut x_min = f64::INFINITY;
     for p in record.iter().chain(two_week.iter()) {
         if p[0] > x_max {
             x_max = p[0];
+        }
+        if p[0] < x_min {
+            x_min = p[0];
         }
     }
     if !x_max.is_finite() {
         return None;
     }
     let x_max = x_max.max(Local::now().timestamp() as f64);
-    let x_min = x_max - span_secs;
+    let data_span = (x_max - x_min).max(0.0);
+    let span = span_secs.max(data_span * 1.5 + 3600.0);
+    let x_min = x_max - span;
 
     let mut y_min = f64::INFINITY;
     let mut y_max = f64::NEG_INFINITY;

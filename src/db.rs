@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 
 pub const DB_FILE: &str = "steam_activity.json";
 const MAX_HISTORY: usize = 20_000;
-const DEDUP_WINDOW_MS: i64 = 10 * 60 * 1000;
+// Only collapse points that arrive within a short window with identical
+// values (rapid duplicate posts from double-posts or multiple tabs). Regular
+// 5-minute refreshes must append a point so the time series actually grows.
+const DEDUP_WINDOW_MS: i64 = 60 * 1000;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GamePoint {
@@ -72,8 +75,7 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn load() -> Self {
-        let path = PathBuf::from(DB_FILE);
+    pub fn load() -> Self {        let path = PathBuf::from(DB_FILE);
         match fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(db) => db,
@@ -177,5 +179,51 @@ impl Database {
                 game.history.drain(..excess);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Database, GameData};
+
+    fn game(name: &str, hours_2weeks: Option<f64>, hours_record: f64) -> GameData {
+        GameData {
+            appid: None,
+            name: name.to_string(),
+            hours_2weeks,
+            hours_record: Some(hours_record),
+        }
+    }
+
+    #[test]
+    fn regular_refreshes_append_points() {
+        let mut db = Database::default();
+        let games = vec![game("CS2", Some(5.0), 100.0)];
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &games, None, 1_000_000);
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &games, None, 1_000_000 + 5 * 60 * 1000);
+        let g = &db.users["user1"].games.values().next().unwrap();
+        assert_eq!(g.history.len(), 2, "5-minute-apart refreshes must each append a point");
+    }
+
+    #[test]
+    fn rapid_duplicate_posts_collapse() {
+        let mut db = Database::default();
+        let games = vec![game("CS2", Some(5.0), 100.0)];
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &games, None, 1_000_000);
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &games, None, 1_000_000 + 30 * 1000);
+        let g = &db.users["user1"].games.values().next().unwrap();
+        assert_eq!(g.history.len(), 1, "near-identical duplicate posts within 60s collapse");
+        assert_eq!(g.history[0].ts, 1_000_000 + 30 * 1000);
+    }
+
+    #[test]
+    fn changed_values_always_append() {
+        let mut db = Database::default();
+        let g1 = vec![game("CS2", Some(5.0), 100.0)];
+        let g2 = vec![game("CS2", Some(5.5), 100.5)];
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &g1, None, 1_000_000);
+        db.apply_callback("user1", "https://steamcommunity.com/id/user1/", None, &g2, None, 1_000_000 + 30 * 1000);
+        let g = &db.users["user1"].games.values().next().unwrap();
+        assert_eq!(g.history.len(), 2, "value changes append even inside the dedup window");
     }
 }
