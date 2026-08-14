@@ -1,2 +1,6 @@
+/target
 /__pycache__
 reference.html
+steam_activity.json
+steam_activity.json.tmp
+steam_activity.json.bak
